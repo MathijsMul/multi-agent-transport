@@ -1,0 +1,503 @@
+__includes ["Astar.nls" "Utility functions.nls"]
+buses-own [
+  ; Static, read-only variables. These values never change. You can read them, but you cannot change them.
+  bus_id          ; The ID of a given agent (bus). Each agent has a unique ID.
+  bus_type        ; The type of a given agent (bus). 1 means "small", 2 means "medium" and 3 means "large".
+    
+  ; Dynamic, read-only variables. These values may change over time. You can read them, but you cannot change them.
+  inbox           ; List containing all the incoming messages (a given message is a list like this [tick sender message]).
+  bus_passengers  ; List containing all the passengers that the agent (bus) is currently carrying (represented as a list like this [passenger_id bus_stop]).
+  previous_stop   ; ID of the last bus stop that the agent (bus) visited (-1 means that the agent has not visited any bus stop yet).
+  current_stop    ; ID of the bus stop where the agent (bus) currently is (-1 means that the agent is not at any bus stop).
+  next_stop       ; ID of the bus stop the agent (bus) is traveling to (-1 means that the agent is not travelling to any bus stop).
+
+  ; New local variables for students.
+
+  capacity        ; Number of passengers a bus can carry
+  patch_cost      ; Moving cost per patch
+
+  destination     ; Next stop as determined by maximal utility     
+  help_status     ; Indicates if bus asked for help, and in what stage of asking help it is
+  got_help_at     ; Tick when bus received help 
+  
+  focus_area      ; Stops in area on which bus focuses
+  my_area         ; Name of area on which bus focuses
+  fixed_area      ; Indicates if bus is set to a fixed area (1) or if focus area can change (0)
+
+  bargain_status  ; Indicates if agent just lost a bargain ("lost bargain") won one ("won bargain") or was not involved in any ("none") 
+  
+  north_area      ; Bus stops in area north
+  east_area       ; Bus stops in area east
+  west_area       ; Bus stops in area west
+  south1_area     ; Bus stops in area south 1
+  south2_area     ; Bus stops in area south 2
+  
+  init            ; Initialization parameter (1 during initialization, 0 otherwise) 
+  
+  ;;;;;;;;;;;;Utility;;;;;;;;;;;;
+
+  ;Weights
+  travelWeight ; implemented in utility
+  passenger-waiting-weight 
+  passenger-waiting-time-weight
+  keep-within-focus-utility
+  outside-focus-area-utility
+  passenger-dropoff-weight
+  
+  ;;;;;;;ASTAR;;;;;;;;
+  path-to-follow
+  path-utility
+  path-iter
+]
+ 
+globals [ graph ]
+
+to init-buses
+  ; Initialization of buses
+  setup-utility
+  set  path-to-follow []
+  set path-iter -1
+
+  ; This list contains the topology of the entire network of bus stops, which is known to all agents. You can use this, for instance, to calculate the shortest path between two bus stops.
+  set graph [[22 15 14] [11 19 23 7] [8] [16 4 20 9] [3 5 10] [4 16 10 17] [8] [1 17 13] [2 6 9] [3 8 20] [4 5 17 13 21] [1 16 17] [20 15 22] [7 10 22 23] [0 23] [0 12 18] [3 5 11] [5 7 10 11] [15] [1 23] [3 9 12 21] [10 20 22] [0 12 13 21] [1 13 14 19]]
+  
+  ; Initialize agent variables
+  
+  ifelse bus_type = 1
+  [
+    set capacity 12
+    set patch_cost 1
+  ]
+  [
+    ifelse bus_type = 2
+    [
+      set capacity 60 
+      set patch_cost 1.5
+    ]
+    [
+      set capacity 150
+      set patch_cost 2
+    ] 
+  ]
+  
+  set destination -1
+  set help_status "none"
+  set init 1
+  set focus_area []
+  set fixed_area 0 
+  
+  ; Have first five buses fixed to their respective areas
+  if member? bus_id [24 25 26 27 28]
+  [
+    set fixed_area 1 
+  ]
+  
+  set north_area [3 9 8 2 8 6 8 9]
+  set west_area [3 4 5 17 11 16]      
+  set south1_area [3 4 10 13 23 14 0 22 21 20]
+  set south2_area [3 4 10 17 7 0 19 23 13 10 4]
+  set east_area [3 20 12 15 18 15 0 22 21 20]
+  set my_area []
+  set got_help_at 0 
+  set bargain_status "none"
+end
+
+to initialize
+  ifelse count buses < 5
+  [
+    ; Have five buses at the start of every day: one for each focus area
+    add-bus 2
+    add-bus 2
+    add-bus 2
+    add-bus 2
+  ]
+  [
+    if bus_id = 24
+    [
+      if init = 1
+      [
+        ; Assign regions to the first buses
+        send-message 24 "north"
+        send-message 25 "west"
+        send-message 26 "south1"
+        send-message 27 "south2"
+        send-message 28 "east" 
+        set init 0
+      ] 
+    ] 
+  ]
+  
+end
+
+to set-area
+  ; Set focus area of bus to a specific region 
+  
+  if my_area = "north"
+  [
+    set focus_area north_area 
+  ] 
+  if my_area = "east"
+  [
+    set focus_area east_area 
+  ]  
+  if my_area = "west"
+  [
+    set focus_area west_area 
+  ]  
+  if my_area = "south1"
+  [
+    set focus_area south1_area 
+  ]  
+  if my_area = "south2"
+  [
+    set focus_area south2_area 
+  ]
+end
+
+
+to handle-inbox
+  ; Manage the incoming messages and reply if necessary
+  
+  if length inbox > 0
+  [
+    foreach inbox
+    [ 
+      let message ?
+      if item 0 message = (ticks - 1)
+      [ 
+        if (item 2 message = "north") or (item 2 message = "west") or (item 2 message = "south1") or (item 2 message = "south2") or (item 2 message = "east")
+        [  
+          ; Set focus area according to received message
+          
+          set my_area (item 2 message)
+          set-area
+          set init 0
+        ]
+        
+        if (is-string? item 2 message) and (length item 2 message) > 14 
+        [
+          ; Help routine 
+          if substring (item 2 message) 0 14 = "help needed in"
+          [
+            ; Handle help routine initiated by other buses that by checking if bus can afford to assist in other focus area
+            
+            if (length bus_passengers) < (0.4 * capacity)
+            [
+              if fixed_area != 1
+              [
+                send-message (item 1 message) "accept" 
+                set my_area (substring (item 2 message) 15 (length (item 2 message)))
+                set-area
+                set init 0
+              ]
+            ]
+          ]
+          
+          ; Voting procedure
+          if substring (item 2 message) 0 16 = "vote for help in"
+          [
+            ; Voting procedure for focus area: vote YES (1) to extra bus in focus area if own occupation exceeds 70% of capacity,
+            ; vote NO (0) otherwise
+            
+            if (substring (item 2 message) 17 (length (item 2 message))) = my_area
+            [
+              ifelse (length bus_passengers) > (0.7 * capacity)
+              [
+                send-message (item 1 message) "vote 1"
+              ]
+              [
+                send-message (item 1 message) "vote 0"
+              ]
+            ]
+          ]
+          
+          if (item 2 message ) = "you lost the bargain"
+          [
+            set bargain_status "lost bargain" 
+          ]
+          
+          if (substring (item 2 message) 0 19) = "same path, utility "
+          [
+            let other-util read-from-string (substring (item 2 message) 19 (length (item 2 message)))
+            
+            ; Compare utilities with buses that plan to follow the same path 
+            ifelse other-util > path-utility
+            [
+              set bargain_status "lost bargain" 
+            ]
+            [
+              set bargain_status "won bargain" 
+              send-message (item 1 message) "you lost the bargain" 
+            ]
+          ]     
+        ]
+        
+        ; Negotiation
+        if is-list? (item 2 message)
+        [
+           if (item 2 message) = path-to-follow
+           ; Bus receives message about planned itinerary of other bus and replies if it is following the same path, with its associated utility
+           [
+              send-message (item 1 message) (word "same path, utility " path-utility)
+           ]
+        ]
+      ]
+    ]
+  ]
+  
+end
+
+
+to execute-actions
+  ; Main actions of the buses, to be performed during initialization or at each tick
+  
+  ifelse init = 1
+  [
+    initialize
+    setup-astar
+  ]
+  [
+    determine-movement
+    handle-passengers
+    add-vehicles
+  ]
+  handle-inbox
+
+end
+
+to-report waiting_in_focus_area
+  ; Get the total number of passengers waiting in the focus area of bus 
+  
+  let total_waiting 0 
+  
+  foreach focus_area
+  [
+    set total_waiting total_waiting + (length ([passengers_waiting] of bus_stop ?))    
+  ]
+  
+  report total_waiting
+end
+
+to determine-movement
+
+; Recalculate path only if we are on a stop
+if current_stop != -1 [
+  ifelse ((not ( (path-iter + 1) < length path-to-follow)) or (length path-to-follow = 0)) [
+      ;show "calculating path"
+      let aout Astar 5
+      set path-to-follow  item 1 aout      
+      set path-utility item 0 aout
+      set path-iter 0
+      
+      ; Inform other buses of path
+      foreach n-values (count buses) [? + 24]
+      [
+         if ? != bus_id 
+         [
+           send-message ? path-to-follow
+         ]
+      ]
+      
+  ]
+  [ ; We still have nodes left in our path
+    let estm-util calculate-utility-of-path path-to-follow path-iter
+    if (estm-util < (path-utility * 0.01 * ((length path-to-follow) / ((length path-to-follow) - path-iter)))) [
+      ;show "recalculating path"
+      let aout Astar 5
+      set path-to-follow  item 1 aout
+      set path-utility item 0 aout
+      set path-iter 0
+    ]
+  ]
+  
+  set path-iter path-iter + 1
+]
+; Always travel to the next destination
+; Current node is first item
+set destination item path-iter path-to-follow
+travel-to item path-iter path-to-follow
+
+end
+
+to handle-passengers
+  if current_stop != -1
+  [
+    
+    ; Always drop off passengers at their destination
+    foreach bus_passengers
+    [
+      if current_stop = item 1 ? 
+      [
+        drop-off-passenger item 0 ? 
+      ]
+    ]
+        
+    let passengers-waiting get-passengers-at-stop current_stop
+    
+    ; Use Central Station as central location for transfers
+    ifelse current_stop = 3
+    [
+      ; First drop off, then collect 
+      foreach bus_passengers
+      [
+        ; Drop off passengers at Central Station whose destination is not in the
+        ; focus area of the current bus, so they can switch buses 
+        if (not member? item 1 ? focus_area) and (not member? item 1 ? path-to-follow)
+        [
+          drop-off-passenger item 0 ?
+        ] 
+      ]
+        
+     ; Similarly, check if there are passengers at Central (possibly dropped off 
+     ; by other buses) whose destination is in the itinerary of the current bus, and pick them up
+     foreach passengers-waiting
+     [
+       if length bus_passengers < capacity
+       [
+         if member? item 1 ? focus_area ;or (member? item 1 ? focus_area)
+         [
+           ; Do not pick up passengers who are already at their destination
+           if current_stop != item 1 ?
+           [
+             pick-up-passenger item 0 ? 
+           ]
+         ]
+       ]          
+     ]
+   ]
+    
+   ; At other stations, pick up anyone if capacity allows 
+   [
+     foreach passengers-waiting
+       [
+         if length bus_passengers < capacity
+         [
+           ; Do not pick up passengers who are already at their destination
+           if current_stop != item 1 ?
+           [
+             pick-up-passenger item 0 ? 
+           ]
+         ]
+       ] 
+     ] 
+   ]
+  
+end
+
+to add-vehicles
+  ; Routine for adding buses 
+  
+  if help_status != "received help"
+  [
+    ifelse (help_status = "none")
+    [
+      if (waiting_in_focus_area > (capacity - length (bus_passengers))) or (length bus_passengers > (capacity * 0.7))
+      ; Initiate voting procedure among buses of the same focus area if the number of passengers waiting in the focus area exceeds the remaining space
+      ; on board or if the number of passengers exceeds 70% of bus capacity
+      
+      [
+        foreach n-values (count buses) [? + 24]
+        [
+          if ? != bus_id 
+          [
+            send-message ? word "vote for help in " my_area
+          ]
+        ]
+        set help_status "voting"
+        
+      ] 
+    ]
+    [
+      ifelse help_status = "voting"
+      [
+        ; Count votes and determine result of the voting by majority count
+        
+        let vote_yes 0
+        let vote_no 0 
+        
+        foreach inbox
+        [
+          if (item 0 ? = ticks) and (is-string? (item 2 ?))
+          [
+            if (substring (item 2 ?) 0 4 = "vote")
+            [
+              ifelse (item 5 (item 2 ?)) = "1"
+              [
+                set vote_yes vote_yes + 1
+              ]
+              [
+                set vote_no vote_no + 1 
+              ]
+            ]
+          ]
+        ]
+        
+        ifelse vote_yes >= vote_no
+        [
+          ; Majority voted YES, so help is needed: a bus of another focus area is reassigned to the current one,
+          ; or a new bus is added.
+          
+          foreach n-values (count buses) [? + 24]
+          [
+            ; Help message is sent out to all other buses
+            
+            if ? != bus_id 
+            [
+              send-message ? word "help needed in " my_area
+            ]
+          ]
+          set help_status "asked for help"
+        ]
+        [
+          ; No marjoity vote in favour, so no help is arranged. 
+          
+          set help_status "none" 
+        ]
+         
+      ]
+      [
+        ifelse help_status = "asked for help"
+        [
+          let helper_bus 0
+          
+          foreach inbox
+          [
+            if (item 0 ? = ticks) and (item 2 ? = "accept")
+            [
+              ; A bus from another focus area has accepted to come and help in the current one
+              
+              set helper_bus 1
+              set help_status "received help"
+              set got_help_at ticks
+            ]
+          ]
+            
+            
+          if helper_bus = 0
+          [
+            ; If no other bus can come to the rescue, a new one is created.
+            
+            add-bus 2
+            set help_status "created bus"
+            set got_help_at ticks
+          ]        
+        ]
+        [
+          if help_status = "created bus"
+          [
+            ; Assign new bus to current focus area.
+            send-message (count buses + 23) my_area 
+            set help_status "received help"
+          ]
+        ]
+      ]
+    ]
+  ]
+  
+  if ticks = (got_help_at + 250)
+  ; After 250 ticks, buses can initiate another help routine
+  [
+    set help_status "none" 
+  ]
+
+end

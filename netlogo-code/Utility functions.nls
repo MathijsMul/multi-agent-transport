@@ -1,0 +1,171 @@
+to setup-utility ;;Run in init-buses
+  set travelWeight 0.1
+  set passenger-waiting-weight 1.3 ; Quadratic
+  set passenger-waiting-time-weight 0.3 ; Quadratically lower utility with time
+  set passenger-dropoff-weight 2.5 ; Dramatic effect on average travel time (70 with 3). Weight is quadratic
+  set keep-within-focus-utility 5
+  set outside-focus-area-utility -5
+end
+
+;;;;;;;;; Main Utility reporters, only sum utility functions ;;;;;;;;
+; All utility functions should report utility and not cost!!
+; Add your utility functions to these two functions.
+; Only add function calls to visit node and travel to node -utility
+; These are directly used in astar
+; Time is always the expected time of arrival
+
+; What utility is expected on arrival based on time (is going in future)
+to-report visit-node-utility [node time]
+  let utility 0
+  
+  set utility utility + passengers-waiting-utility node time
+  set utility utility + passenger-drop-off node time
+  set utility utility + visit-central-station node time
+  
+  report utility
+end
+
+; What utility is expected on arrival based on time
+; NOTE: THis utility is always added, also on revisit
+to-report visit-node-utility-always [node time]
+  let utility -5
+  
+  set utility utility + within-focus-area node time
+  
+  report utility
+end
+
+; What utility is expected when we leave a node and travel to the next node
+to-report travel-to-node-utility [from-node to-node time]
+  let utility 0
+  
+  set utility utility + travel-cost-utility from-node to-node time
+  
+  report utility
+end
+
+;;;;;;;;;;;;;;;;; Utility functions ;;;;;;;;;;;;;;;
+; The seperate utility functions, add as you see fit
+
+; Report the negative utility (cost) from traveling to another node
+; Time is not used
+to-report travel-cost-utility [from-node to-node time]
+  let cost 0
+  ;; Get distance
+  set cost cost + get-distance from-node to-node
+  set cost cost * patch_cost
+  ;; Set weight
+  set cost cost * travelWeight ;Weight
+  
+  ;; Report utility
+  report 0 - cost
+end
+
+;; Reports the utility based on the number of passengers waiting at a stop
+;; Decreases the utility based on how far ahead in time this guess is made
+to-report passengers-waiting-utility [node time]
+  let utility 0
+
+  set utility utility + length get-passengers-at-stop node
+  
+  ; Scale based on weight
+  set utility utility ^ passenger-waiting-weight
+  
+  ; Scale based on current amount of passengers in the bus
+  set utility utility * ((capacity - length bus_passengers) / capacity)
+  
+  report utility
+end
+
+; Calculate utility of dropping off passengers
+to-report passenger-drop-off [node time]
+  let utility 0
+  
+  foreach bus_passengers
+  [
+    if item 1 ? = node [
+      set utility utility + 1
+    ]
+  ]
+  
+  report (utility ^ passenger-dropoff-weight)
+  
+end
+
+;; Stay within focus area utility
+to-report within-focus-area [node time]
+  let utility outside-focus-area-utility
+  if member? node focus_area  [
+    set utility keep-within-focus-utility
+  ]
+  report utility
+end
+
+; The utility gained from visiting a node outside the focus area if we drop off all pasengers that do not belong in our focus area
+to-report visit-central-station [node time]
+  let utility 0
+  
+  if node = 3 [
+    foreach bus_passengers [
+      if not member? item 1 ? focus_area [ set utility utility + 0.5 ]
+    ]
+    
+    foreach get-passengers-at-stop 3 [
+      if member? item 1 ? focus_area [ set utility utility + 1 ]
+    ]
+  ]
+ 
+  report utility  
+end
+
+
+;;;;;;;;;;;;; calculate-utility-of-path function ;;;;;;;;;;;;;;;;;
+; (Re)calculates the utility of the given path without needing Astar to recalculate all possible paths
+to-report calculate-utility-of-path [path current_position] 
+  ;Bootstrap
+  if length path <= 1 [
+    report 0
+  ]
+  
+  let cnode item 0 path
+  let pnode 0
+  let ctime ticks
+  let ptime 0
+  
+  let iter 1
+  let util 0
+  
+  while [iter < length path] [
+    set ptime ctime
+    set pnode cnode
+    set cnode item iter path
+    set ctime ctime + (round get-distance pnode cnode)
+    
+    ; Calculate utility
+    ifelse pnode = cnode [
+      ; We have waited
+      set util util - wait-cost
+    ]
+    [ ifelse member? cnode sublist path 0 iter [
+        ; We have visited already
+        set util util + travel-to-node-utility pnode cnode ptime
+    ]
+    [ ; We have not yet visited
+      set util util + visit-node-utility cnode ctime
+    ]
+    ]
+    ; Add always visit node utility
+    set util util + visit-node-utility-always cnode ctime
+   
+    set iter iter + 1
+  ]
+    
+    ; Reduce the estimated utility in case the bus lost a bargain, in order to force recalculation of path 
+    if bargain_status = "lost bargain"
+    [
+      set util 0  
+      set bargain_status "none"
+    ]
+    
+    report util
+end

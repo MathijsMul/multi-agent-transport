@@ -1,0 +1,224 @@
+globals [
+  ;;;;;;;;;;;;;Astar;;;;;;;;;;;;;
+  wait-cost
+  max-astar-nodes
+  loop-termination-iterations
+  lower-bound-utility ; removes an option if utility dips below this value
+]
+
+to setup-astar
+  set wait-cost 2
+  set max-astar-nodes 6 ; unused in algorithm, use variable as argument for Astar [max-nodes]
+  set loop-termination-iterations 1000
+  set lower-bound-utility -50
+end
+
+;Astar algorithm ala erwin
+; Nodes:
+;    list of: current node, prev node(s), gained utility until now  (expected), time, unique_nodes (not completely true, only omits waiting on a node. Does count revisits)
+;    prev nodes is a recursive list of all visisted nodes
+;; Returns
+; a list containing:
+; [0] path => [current node, next node, the node thereafter, etc]
+; [1] expected utility => total utility gained by following this route
+
+; Summary of the content of a node (For me :))
+; [0] current node
+; [1] prev nodes
+; [2] tot. util.
+; [3] time of arrival at this node
+; [4] total number of transistions made to other nodes
+
+;; Note that: (DO READ ME!)
+; -Currently, only the highest utility is chosen after [max-astar-nodes] steps
+;  Is this enough to imply that always the highest utility increase is followed? (see max-aster-nodes point)
+; -Every note Astar should be called again to update
+; -max-aster-nodes can be changed dynamicly, use it to calcute long term and short term solutions!
+;  This as a short path with highest utility is NOT (NOT NOT NOT) the same as a long path with highest utility
+;  Kinda like short term reward and long-term rewards in psychology
+
+;; Dependencies
+;This tries to be a tree:
+; - to Astar
+; |- to retrace-steps
+; |- to get-route-options
+; ||- to visit-node-utility 
+; ||- to travel-to-node-utility
+; ||- wait-cost
+; ||- to get-distance
+; LL- graph
+
+to-report Astar [max-nodes]
+  let a_open []
+  let a_closed []
+  let currentNode []
+  
+  let time ticks
+  
+  ;;Bootstrap
+  if current_stop = -1 [
+    ;show "Astar needs to be at a stop"
+    report []
+  ]
+  
+  set currentNode (list current_stop [] 0 time 0)
+  
+  ;;Setup loop variables
+  let do_loop TRUE
+  let highest_utility [0 [] -999999 0 0]
+  let loop_counter 0
+  
+  ;;Main loop
+  while [do_loop] [
+    ; Reset highest utility
+    set highest_utility [0 [] -999999 0 0]
+    ; Fill open
+    set a_open sentence get-route-options currentNode a_open ;Based upon current node, get all possible next nodes
+    set a_open remove-duplicates a_open
+    ; Stop loop if a_open is empty
+    
+    ; Select an open node
+    foreach a_open [
+      ; Check if entry exceeds max nodes (max-astar-nodes)
+      ifelse item 4 ? >= (max-nodes - 1) [
+        ; Remove from open and add to closed
+        set a_open remove ? a_open
+        set a_closed lput ? a_closed
+      ]
+      [
+      
+        ;; If under lowerbound, just remove
+        ifelse item 2 ? < lower-bound-utility [
+          set a_open remove ? a_open
+        ]
+        [
+          ; Check if this utility is higher
+          if item 2 highest_utility  < item 2 ? [
+            ; Set new best current node
+            set highest_utility ?
+            ;show highest_utility
+          ]
+        ]
+      ]
+    ] 
+    
+    ;; Now check if we found something with highest_utility (just to be sure nothing went wrong)
+    if highest_utility = [0 0 -999999 0 0] [
+      ; This should never happen, report it!
+      show "No highest utility found, This should not happen!"
+    ]
+    
+    ; Selection is now final, highest_utility is our new node
+    ; Set highest_utility as current_node
+    set currentNode highest_utility
+    ; Remove from open list (it contains the previous node)
+    set a_open remove currentNode a_open
+    
+    ;; Repeat this process until there are no more open nodes
+    if length a_open <= 0 [ set do_loop False ]
+    
+    ;; Loop iteration protection
+    if loop_counter > loop-termination-iterations [
+      ;show "Loop exceeded max iterations"
+      set do_loop False
+    ]
+    
+    set loop_counter loop_counter + 1
+  ]
+  
+  ; If we exit the loop due to iterations, let a_closed be a_open
+  if length a_closed = 0 [
+    set a_closed a_open
+  ]
+  ;; All possibilities have been exhausted (a_open is empty)
+  ;  Now, iterate a_closed for the best solution
+  let finalSolution [0 [] -999999 0 0]
+  foreach a_closed [
+    if item 2 ? > item 2 finalSolution [
+      set finalSolution ?
+    ]
+  ]
+  
+    ;; (again) Now check if we found something with highest_utility (just to be sure nothing went wrong)
+  if finalSolution = [0 [] -999999 0 0] [
+    ;This should never happen, report it!
+    show "Could not determine route! This should not happen!"
+  ]
+  
+  ;; Now reconstruct recursive node to path
+  let answer (list item 2 finalSolution retrace-steps finalSolution)
+  report answer
+end
+
+to-report retrace-steps [cNode]
+  let prev_nodes []
+  let this_node item 0 cNode
+  
+  if length item 1 cNode > 0 [
+    set prev_nodes retrace-steps item 1 cNode
+  ]
+  
+  ; Put this node in front of all the others
+  report lput this_node prev_nodes
+  
+end
+
+to-report is-revisit [nNode cNode]
+  if nNode = item 0 cNode [
+    report true
+  ]
+  if length item 1 cNode > 0 [
+    report is-revisit nNode item 1 cNode
+  ]
+  report false
+end
+
+to-report get-route-options [cNode]
+  let opens []
+  let nextNode 0
+  let nextUtility 0
+  let nextTime 0
+  let nextUNodes 0 ;Number of unique nodes visited
+  let deltaTime 0
+  
+  ;; Extract cNode
+  let currentNode item 0 cNode
+  ;; Prev node of no interest
+  let currentUtility item 2 cNode
+  let currentTime item 3 cNode
+  let currentUNodes item 4 cNode
+  
+  ;; Wait option (this node -> this node)
+  set nextNode currentNode
+  set nextUtility currentUtility - wait-cost
+  set nextTime currentTime + 1 ;Waiting costs one tick
+  set nextUtility nextUtility + visit-node-utility-always nextNode nextTime
+  set nextUNodes currentUNodes ; Not another unique node
+  set opens lput (list nextNode cNode nextUtility nextTime nextUNodes) opens
+  
+  ;; For all (other) options
+  ; For each options from current node in graph
+  foreach item currentNode graph [
+    ;; Set variables
+    set nextNode ?
+    set deltaTime round get-distance currentNode nextNode
+    set nextTime currentTime + deltaTime
+    
+    ;; Calculate cost of leaving and traveling and add to utility
+    set nextUtility currentUtility + travel-to-node-utility currentNode nextNode currentTime
+
+    ;; Now calculate expected utility on arrival if we have not visited this before
+    if not is-revisit nextNode cNode [
+      set nextUtility nextUtility + visit-node-utility nextNode nextTime
+    ]
+    set nextUtility nextUtility + visit-node-utility-always nextNode nextTime
+    
+    ;; Increment unique nodes visited
+    set nextUNodes currentUNodes + 1
+    
+    ;; Save option
+    set opens lput (list nextNode cNode nextUtility nextTime nextUNodes) opens
+  ]
+  
+  report opens
+end
